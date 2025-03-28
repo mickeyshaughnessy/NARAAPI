@@ -1,5 +1,5 @@
 """
-Generic API Server
+API Server with Data Privacy Features
 """
 
 import flask, os, json, time
@@ -8,7 +8,13 @@ from functools import wraps
 import secrets
 
 # Import handlers
-# Add your handler imports here
+from handlers import (
+    query_archives,
+    apply_filters,
+    redact_names,
+    add_differential_privacy,
+    combined_query_with_privacy
+)
 
 # Import utilities
 from utils import redis_client, verify_password
@@ -110,46 +116,225 @@ def login():
     except Exception as e:
         return flask.jsonify({"error": str(e)}), 500
 
-@app.route('/api/protected-resource', methods=['GET'])
+# Data privacy endpoints
+@app.route('/api/query', methods=['POST'])
 @token_required
-def protected_resource(current_user):
-    try:
-        # Get query parameters
-        data = flask.request.args.to_dict()
-        data['username'] = current_user
-        # Replace with your handler
-        # response, status = get_resource(data)
-        response, status = {"message": "This is a protected resource", "user": current_user}, 200
-        return flask.jsonify(response), status
-    except Exception as e:
-        return flask.jsonify({"error": str(e)}), 500
-
-@app.route('/api/public-resource', methods=['GET'])
-def public_resource():
-    try:
-        # Get query parameters
-        data = flask.request.args.to_dict()
-        # Replace with your handler
-        response, status = {"message": "This is a public resource"}, 200
-        return flask.jsonify(response), status
-    except Exception as e:
-        return flask.jsonify({"error": str(e)}), 500
-
-# Example of a POST endpoint with authentication
-@app.route('/api/user-data', methods=['POST'])
-@token_required
-def handle_user_data(current_user):
+def handle_query(current_user):
+    """Endpoint for querying archives"""
     try:
         data = flask.request.get_json()
         if not data:
             return flask.jsonify({"error": "Invalid JSON data"}), 400
-        data['username'] = current_user
-        # Replace with your handler
-        # response, status = process_user_data(data)
-        response, status = {"message": "User data received", "user": current_user}, 200
+            
+        # Add user_id for auditing
+        data['user_id'] = current_user
+        
+        response, status = query_archives(data)
         return flask.jsonify(response), status
     except Exception as e:
         return flask.jsonify({"error": str(e)}), 500
+
+@app.route('/api/filter', methods=['POST'])
+@token_required
+def handle_filter(current_user):
+    """Endpoint for filtering data"""
+    try:
+        data = flask.request.get_json()
+        if not data:
+            return flask.jsonify({"error": "Invalid JSON data"}), 400
+            
+        # Add user_id for auditing
+        data['user_id'] = current_user
+        
+        response, status = apply_filters(data)
+        return flask.jsonify(response), status
+    except Exception as e:
+        return flask.jsonify({"error": str(e)}), 500
+
+@app.route('/api/redact', methods=['POST'])
+@token_required
+def handle_redact(current_user):
+    """Endpoint for redacting names"""
+    try:
+        data = flask.request.get_json()
+        if not data:
+            return flask.jsonify({"error": "Invalid JSON data"}), 400
+            
+        # Add user_id for auditing
+        data['user_id'] = current_user
+        
+        response, status = redact_names(data)
+        return flask.jsonify(response), status
+    except Exception as e:
+        return flask.jsonify({"error": str(e)}), 500
+
+@app.route('/api/privacy', methods=['POST'])
+@token_required
+def handle_privacy(current_user):
+    """Endpoint for adding differential privacy"""
+    try:
+        data = flask.request.get_json()
+        if not data:
+            return flask.jsonify({"error": "Invalid JSON data"}), 400
+            
+        # Add user_id for auditing
+        data['user_id'] = current_user
+        
+        response, status = add_differential_privacy(data)
+        return flask.jsonify(response), status
+    except Exception as e:
+        return flask.jsonify({"error": str(e)}), 500
+
+@app.route('/api/secure-query', methods=['POST'])
+@token_required
+def handle_secure_query(current_user):
+    """Combined endpoint for secure data querying with privacy protections"""
+    try:
+        data = flask.request.get_json()
+        if not data:
+            return flask.jsonify({"error": "Invalid JSON data"}), 400
+            
+        # Add user_id for auditing
+        data['user_id'] = current_user
+        
+        response, status = combined_query_with_privacy(data)
+        return flask.jsonify(response), status
+    except Exception as e:
+        return flask.jsonify({"error": str(e)}), 500
+
+# Add health check endpoint for privacy services
+@app.route('/api/privacy-services/health', methods=['GET'])
+def privacy_health():
+    """Health check for privacy services"""
+    return flask.jsonify({
+        "status": "healthy",
+        "services": {
+            "query": "available",
+            "filter": "available",
+            "redact": "available", 
+            "privacy": "available"
+        }
+    }), 200
+
+# Add OpenAPI documentation for the API
+@app.route('/api/docs', methods=['GET'])
+def api_docs():
+    docs = {
+        "openapi": "3.0.0",
+        "info": {
+            "title": "Data Privacy API",
+            "description": "API for querying archives with privacy protections",
+            "version": "1.0.0"
+        },
+        "paths": {
+            "/api/query": {
+                "post": {
+                    "summary": "Query archives",
+                    "description": "Query data from archives based on provided parameters",
+                    "security": [{"BearerAuth": []}],
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "query_type": {"type": "string"},
+                                        "time_range": {"type": "object"},
+                                        "filters": {"type": "object"},
+                                        "limit": {"type": "integer"},
+                                        "offset": {"type": "integer"}
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Successful query"
+                        }
+                    }
+                }
+            },
+            "/api/filter": {
+                "post": {
+                    "summary": "Filter data",
+                    "description": "Apply advanced filtering to data",
+                    "security": [{"BearerAuth": []}],
+                    "responses": {
+                        "200": {
+                            "description": "Successful filtering"
+                        }
+                    }
+                }
+            },
+            "/api/redact": {
+                "post": {
+                    "summary": "Redact names",
+                    "description": "Redact personal names from data",
+                    "security": [{"BearerAuth": []}],
+                    "responses": {
+                        "200": {
+                            "description": "Successful redaction"
+                        }
+                    }
+                }
+            },
+            "/api/privacy": {
+                "post": {
+                    "summary": "Add differential privacy",
+                    "description": "Add differential privacy noise to data",
+                    "security": [{"BearerAuth": []}],
+                    "responses": {
+                        "200": {
+                            "description": "Successful privacy protection"
+                        }
+                    }
+                }
+            },
+            "/api/secure-query": {
+                "post": {
+                    "summary": "Secure query with privacy protections",
+                    "description": "Combined endpoint for secure data querying with filtering, redaction, and differential privacy",
+                    "security": [{"BearerAuth": []}],
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "query_type": {"type": "string"},
+                                        "time_range": {"type": "object"},
+                                        "query_filters": {"type": "object"},
+                                        "filters": {"type": "object"},
+                                        "fields_to_redact": {"type": "array"},
+                                        "numeric_fields": {"type": "array"},
+                                        "epsilon": {"type": "number"},
+                                        "sensitivity": {"type": "number"}
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Successful secure query"
+                        }
+                    }
+                }
+            }
+        },
+        "components": {
+            "securitySchemes": {
+                "BearerAuth": {
+                    "type": "http",
+                    "scheme": "bearer"
+                }
+            }
+        }
+    }
+    return flask.jsonify(docs), 200
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=config.API_PORT, debug=True)
