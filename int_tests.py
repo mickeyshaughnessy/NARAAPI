@@ -1,718 +1,419 @@
-#!/usr/bin/env python3
-import json,sys,os,time,random, string, requests
-from datetime import datetime, timedelta
+"""
+Integration tests for the API server with visual feedback and summary stats
+"""
 
 ############
-# thinking
-# Rewrite the tests to be simpler and standalone:
-# 1. Remove unittest framework
-# 2. Use simple assertions with custom error messages
-# 3. Create a simple test runner that reports success/failure
-# 4. Keep the same test coverage but with simpler structure
-# </thinking>
+# Thinking
+# 🤔🤔🤔🤠
+# Need to add more verbosity without going overboard:
+# 1. Add more emojis for different test types
+# 2. Include visual command-line art/borders
+# 3. Add summary statistics at the end
+# 4. Keep the fixed endpoint approach (/api/metrics for protected tests)
+# 5. Add progress indicators and more detailed test info
+# 6. Track test results for summary generation
+#</thinking>
 ###########
 
-# Configuration
-BASE_URL = os.environ.get('API_BASE_URL', 'http://localhost:8000/api')
-API_KEY = os.environ.get('API_KEY', 'test_api_key')
-TEST_NUMBER = '4155551234'  # Test phone number for SMS/call tests
+import unittest
+import json
+import requests
+import config
+import time
+import sys
+from termcolor import colored
+from utils import generate_token, store_token, redis_client
 
-# Test status tracking
-tests_run = 0
-tests_passed = 0
-tests_failed = 0
-created_resources = {}  # Keep track of resources to clean up
+# Base URL for API requests
+BASE_URL = f"http://localhost:{config.API_PORT}"
 
-# Colors for terminal output
-GREEN = '\033[92m'
-RED = '\033[91m'
-YELLOW = '\033[93m'
-RESET = '\033[0m'
-BOLD = '\033[1m'
+# Enhanced emoji indicators
+EMOJI_SUCCESS = "✅"
+EMOJI_FAILURE = "❌"
+EMOJI_INFO = "ℹ️"
+EMOJI_SERVER = "🖥️"
+EMOJI_AUTH = "🔐"
+EMOJI_DB = "🗄️"
+EMOJI_API = "🌐"
+EMOJI_USER = "👤"
+EMOJI_TEST = "🧪"
+EMOJI_TIME = "⏱️"
+EMOJI_PRIVACY = "🔒"
+EMOJI_ROCKET = "🚀"
+EMOJI_SECURITY = "🛡️"
 
-# Helper functions
-def random_string(length=10):
-    """Generate a random string for test data"""
-    return ''.join(random.choice(string.ascii_letters) for _ in range(length))
+# Command line art elements
+BOX_TOP = "┏" + "━" * 70 + "┓"
+BOX_BOTTOM = "┗" + "━" * 70 + "┛"
+BOX_LINE = "┃"
+SEPARATOR = "─" * 72
 
-def create_auth_headers():
-    """Create headers with authentication"""
-    return {
-        'Authorization': f'Bearer {API_KEY}',
-        'Content-Type': 'application/json'
-    }
+class TestStats:
+    """Track test statistics for summary reporting"""
+    def __init__(self):
+        self.total = 0
+        self.passed = 0
+        self.failed = 0
+        self.skipped = 0
+        self.start_time = None
+        self.end_time = None
+        self.test_results = []
+    
+    def add_result(self, test_name, result, duration):
+        self.test_results.append({
+            "name": test_name,
+            "result": result,
+            "duration": duration
+        })
+        self.total += 1
+        if result == "PASS":
+            self.passed += 1
+        elif result == "FAIL":
+            self.failed += 1
+        elif result == "SKIP":
+            self.skipped += 1
+    
+    def print_summary(self):
+        if not self.start_time or not self.end_time:
+            return
+            
+        total_time = self.end_time - self.start_time
+        
+        print(f"\n{BOX_TOP}")
+        print(f"{BOX_LINE} {EMOJI_ROCKET} {colored('TEST SUMMARY', 'cyan', attrs=['bold'])} {' ' * 54}{BOX_LINE}")
+        print(f"{BOX_LINE}{' ' * 70}{BOX_LINE}")
+        print(f"{BOX_LINE} Total Tests: {colored(self.total, 'white', attrs=['bold'])} {' ' * 55}{BOX_LINE}")
+        print(f"{BOX_LINE} Passed:      {colored(self.passed, 'green', attrs=['bold'])} {' ' * 55}{BOX_LINE}")
+        print(f"{BOX_LINE} Failed:      {colored(self.failed, 'red', attrs=['bold'])} {' ' * 55}{BOX_LINE}")
+        print(f"{BOX_LINE} Skipped:     {colored(self.skipped, 'yellow', attrs=['bold'])} {' ' * 55}{BOX_LINE}")
+        print(f"{BOX_LINE} Total Time:  {colored(f'{total_time:.2f}s', 'blue', attrs=['bold'])} {' ' * 51}{BOX_LINE}")
+        print(f"{BOX_LINE}{' ' * 70}{BOX_LINE}")
+        
+        # Show performance stats
+        print(f"{BOX_LINE} {EMOJI_TIME} {colored('TEST PERFORMANCE', 'cyan', attrs=['bold'])} {' ' * 50}{BOX_LINE}")
+        print(f"{BOX_LINE}{' ' * 70}{BOX_LINE}")
+        
+        # Sort tests by duration
+        sorted_results = sorted(self.test_results, key=lambda x: x["duration"], reverse=True)
+        for i, test in enumerate(sorted_results[:5]):
+            name = test["name"][:40].ljust(40)
+            result_color = "green" if test["result"] == "PASS" else "red"
+            result_text = colored(f"{test['result']}", result_color)
+            duration = colored(f"{test['duration']:.3f}s", "blue")
+            print(f"{BOX_LINE} {i+1}. {name} {result_text} {duration} {' ' * (18 - len(test['result']))}{BOX_LINE}")
+            
+        print(f"{BOX_BOTTOM}")
 
-def assert_equals(actual, expected, message=None):
-    """Assert that actual equals expected"""
-    global tests_run, tests_passed, tests_failed
-    tests_run += 1
-    
-    if actual == expected:
-        tests_passed += 1
-        return True
-    else:
-        tests_failed += 1
-        error_msg = message or f"Expected {expected}, got {actual}"
-        print(f"{RED}FAIL: {error_msg}{RESET}")
-        return False
+# Global stats tracker
+test_stats = TestStats()
 
-def assert_true(condition, message=None):
-    """Assert that condition is True"""
-    global tests_run, tests_passed, tests_failed
-    tests_run += 1
+class APIIntegrationTests(unittest.TestCase):
+    """Test cases for API server endpoints with visual feedback"""
     
-    if condition:
-        tests_passed += 1
-        return True
-    else:
-        tests_failed += 1
-        error_msg = message or "Assertion failed"
-        print(f"{RED}FAIL: {error_msg}{RESET}")
-        return False
-
-def assert_in(item, container, message=None):
-    """Assert that item is in container"""
-    global tests_run, tests_passed, tests_failed
-    tests_run += 1
-    
-    if item in container:
-        tests_passed += 1
-        return True
-    else:
-        tests_failed += 1
-        error_msg = message or f"Expected {item} to be in {container}"
-        print(f"{RED}FAIL: {error_msg}{RESET}")
-        return False
-
-def assert_is_instance(obj, cls, message=None):
-    """Assert that obj is an instance of cls"""
-    global tests_run, tests_passed, tests_failed
-    tests_run += 1
-    
-    if isinstance(obj, cls):
-        tests_passed += 1
-        return True
-    else:
-        tests_failed += 1
-        error_msg = message or f"Expected object of type {cls.__name__}, got {type(obj).__name__}"
-        print(f"{RED}FAIL: {error_msg}{RESET}")
-        return False
-
-def run_test(test_func, *args, **kwargs):
-    """Run a test function and report success/failure"""
-    global tests_run, tests_passed, tests_failed
-    
-    test_name = test_func.__name__
-    print(f"\n{BOLD}Running test: {test_name}{RESET}")
-    
-    start_time = time.time()
-    
-    try:
-        test_func(*args, **kwargs)
-        elapsed = time.time() - start_time
-        print(f"{GREEN}PASS: {test_name} ({elapsed:.2f}s){RESET}")
-    except AssertionError as e:
-        elapsed = time.time() - start_time
-        tests_failed += 1
-        print(f"{RED}FAIL: {test_name} - {str(e)} ({elapsed:.2f}s){RESET}")
-    except Exception as e:
-        elapsed = time.time() - start_time
-        tests_failed += 1
-        print(f"{RED}ERROR: {test_name} - {type(e).__name__}: {str(e)} ({elapsed:.2f}s){RESET}")
-
-def cleanup_resources():
-    """Clean up any resources created during tests"""
-    headers = create_auth_headers()
-    
-    print(f"\n{YELLOW}Cleaning up created resources...{RESET}")
-    
-    for resource_type, resource_ids in created_resources.items():
-        for resource_id in resource_ids:
-            try:
-                response = requests.delete(
-                    f"{BASE_URL}/{resource_type}/{resource_id}",
-                    headers=headers
-                )
-                if response.status_code == 204:
-                    print(f"Deleted {resource_type}/{resource_id}")
-                else:
-                    print(f"Failed to delete {resource_type}/{resource_id}: {response.status_code}")
-            except Exception as e:
-                print(f"Error cleaning up {resource_type}/{resource_id}: {e}")
-
-def add_resource_for_cleanup(resource_type, resource_id):
-    """Add a resource to be cleaned up after tests"""
-    if resource_type not in created_resources:
-        created_resources[resource_type] = []
-    created_resources[resource_type].append(resource_id)
-
-#############################################################
-# Tests
-#############################################################
-
-def test_health_check():
-    """Test API health check endpoint"""
-    response = requests.get(f"{BASE_URL}/health")
-    assert_equals(response.status_code, 200, "Health check should return 200")
-    data = response.json()
-    assert_equals(data['status'], 'ok', "Health check status should be 'ok'")
-
-def test_unauthorized_access():
-    """Test unauthorized access is properly rejected"""
-    # Try without auth headers
-    response = requests.get(f"{BASE_URL}/contacts")
-    assert_equals(response.status_code, 401, "Unauthorized request should return 401")
-    
-    # Try with invalid API key
-    invalid_headers = {
-        'Authorization': 'Bearer invalid_key',
-        'Content-Type': 'application/json'
-    }
-    response = requests.get(f"{BASE_URL}/contacts", headers=invalid_headers)
-    assert_equals(response.status_code, 401, "Invalid API key should return 401")
-
-def test_crud_operations():
-    """Test Create, Read, Update, Delete operations"""
-    headers = create_auth_headers()
-    
-    # CREATE
-    contact_data = {
-        'name': f'Test Contact {random_string()}',
-        'number': f'555{random.randint(1000000, 9999999)}',
-        'email': f'{random_string()}@example.com'
-    }
-    
-    create_response = requests.post(
-        f"{BASE_URL}/contacts",
-        headers=headers,
-        json=contact_data
-    )
-    assert_equals(create_response.status_code, 201, "Contact creation should return 201")
-    created_contact = create_response.json()
-    assert_in('id', created_contact, "Created contact should have an ID")
-    
-    # Store for cleanup
-    contact_id = created_contact['id']
-    add_resource_for_cleanup('contacts', contact_id)
-    
-    # READ
-    read_response = requests.get(
-        f"{BASE_URL}/contacts/{contact_id}",
-        headers=headers
-    )
-    assert_equals(read_response.status_code, 200, "Contact retrieval should return 200")
-    retrieved_contact = read_response.json()
-    assert_equals(retrieved_contact['name'], contact_data['name'], "Retrieved contact name should match")
-    assert_equals(retrieved_contact['number'], contact_data['number'], "Retrieved contact number should match")
-    
-    # UPDATE
-    update_data = {
-        'name': f'Updated {contact_data["name"]}',
-        'notes': 'Added during test'
-    }
-    update_response = requests.put(
-        f"{BASE_URL}/contacts/{contact_id}",
-        headers=headers,
-        json=update_data
-    )
-    assert_equals(update_response.status_code, 200, "Contact update should return 200")
-    updated_contact = update_response.json()
-    assert_equals(updated_contact['name'], update_data['name'], "Updated contact name should match")
-    assert_equals(updated_contact['notes'], update_data['notes'], "Updated contact notes should match")
-    
-    # LIST
-    list_response = requests.get(
-        f"{BASE_URL}/contacts",
-        headers=headers
-    )
-    assert_equals(list_response.status_code, 200, "Contacts list should return 200")
-    contacts_list = list_response.json()
-    assert_is_instance(contacts_list, list, "Contacts should be returned as a list")
-    contact_ids = [c['id'] for c in contacts_list]
-    assert_in(contact_id, contact_ids, "Created contact should be in the list")
-    
-    # DELETE
-    delete_response = requests.delete(
-        f"{BASE_URL}/contacts/{contact_id}",
-        headers=headers
-    )
-    assert_equals(delete_response.status_code, 204, "Contact deletion should return 204")
-    
-    # Verify deleted
-    get_deleted_response = requests.get(
-        f"{BASE_URL}/contacts/{contact_id}",
-        headers=headers
-    )
-    assert_equals(get_deleted_response.status_code, 404, "Deleted contact should return 404")
-    
-    # Remove from cleanup since we already deleted it
-    if 'contacts' in created_resources and contact_id in created_resources['contacts']:
-        created_resources['contacts'].remove(contact_id)
-
-def test_not_found():
-    """Test proper 404 response for non-existent resources"""
-    headers = create_auth_headers()
-    
-    response = requests.get(
-        f"{BASE_URL}/contacts/non_existent_id",
-        headers=headers
-    )
-    assert_equals(response.status_code, 404, "Non-existent contact should return 404")
-    
-    response = requests.get(
-        f"{BASE_URL}/non_existent_endpoint",
-        headers=headers
-    )
-    assert_equals(response.status_code, 404, "Non-existent endpoint should return 404")
-
-def test_validation_errors():
-    """Test validation errors are properly returned"""
-    headers = create_auth_headers()
-    
-    # Missing required field
-    contact_data = {
-        'email': f'{random_string()}@example.com'
-        # Missing 'name' and 'number' which are required
-    }
-    
-    response = requests.post(
-        f"{BASE_URL}/contacts",
-        headers=headers,
-        json=contact_data
-    )
-    assert_equals(response.status_code, 400, "Invalid contact data should return 400")
-    error_data = response.json()
-    assert_in('errors', error_data, "Error response should contain 'errors' field")
-    
-    # Invalid data type
-    contact_data = {
-        'name': 'Test Contact',
-        'number': 'not-a-number',  # Should be numeric
-        'email': f'{random_string()}@example.com'
-    }
-    
-    response = requests.post(
-        f"{BASE_URL}/contacts",
-        headers=headers,
-        json=contact_data
-    )
-    assert_equals(response.status_code, 400, "Invalid number format should return 400")
-    error_data = response.json()
-    assert_in('errors', error_data, "Error response should contain 'errors' field")
-
-def test_contact_search():
-    """Test searching contacts"""
-    headers = create_auth_headers()
-    
-    # Create test contacts
-    unique_name = f'Searchable {random_string()}'
-    contacts_data = [
-        {
-            'name': unique_name,
-            'number': f'555{random.randint(1000000, 9999999)}',
-            'email': f'{random_string()}@example.com'
-        },
-        {
-            'name': f'Another {unique_name}',
-            'number': f'555{random.randint(1000000, 9999999)}',
-            'email': f'{random_string()}@example.com'
-        },
-        {
-            'name': 'Unrelated Contact',
-            'number': f'555{random.randint(1000000, 9999999)}',
-            'email': f'{random_string()}@example.com'
+    @classmethod
+    def setUpClass(cls):
+        """Setup test environment once before all tests"""
+        test_stats.start_time = time.time()
+        
+        print(f"\n{BOX_TOP}")
+        print(f"{BOX_LINE} {EMOJI_ROCKET} {colored('API INTEGRATION TESTS', 'cyan', attrs=['bold'])} {' ' * 50}{BOX_LINE}")
+        print(f"{BOX_BOTTOM}")
+        
+        # Create a test user and token
+        cls.test_username = "testuser"
+        cls.test_token = generate_token()
+        store_token(cls.test_username, cls.test_token, expires_in=3600)
+        print(f"{EMOJI_AUTH} Created test token for user: {colored(cls.test_username, 'cyan')}")
+        
+        # Headers for authenticated requests
+        cls.auth_headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {cls.test_token}"
         }
-    ]
+        
+        # Headers for unauthenticated requests
+        cls.headers = {
+            "Content-Type": "application/json"
+        }
+        
+        # Check server availability
+        cls._wait_for_server()
     
-    created_ids = []
-    for contact_data in contacts_data:
-        response = requests.post(
-            f"{BASE_URL}/contacts",
-            headers=headers,
-            json=contact_data
+    @classmethod
+    def _wait_for_server(cls):
+        """Wait for the server to be ready"""
+        print(f"{EMOJI_SERVER} Checking server availability...")
+        retry_count = 0
+        max_retries = 5
+        
+        while retry_count < max_retries:
+            try:
+                response = requests.get(f"{BASE_URL}/ping", timeout=3)
+                if response.status_code == 200:
+                    print(f"{EMOJI_SUCCESS} Server is ready and responding")
+                    return
+                    
+            except requests.RequestException:
+                pass
+            
+            print(f"{EMOJI_INFO} Waiting for server to start... (attempt {retry_count+1}/{max_retries})")
+            time.sleep(2)
+            retry_count += 1
+            
+        print(f"{EMOJI_FAILURE} Server not available after {max_retries} attempts")
+        sys.exit(1)
+    
+    @classmethod
+    def tearDownClass(cls):
+        """Clean up after all tests"""
+        # Remove test user token
+        redis_client.delete(f"auth_token:{cls.test_token}")
+        print(f"{EMOJI_AUTH} Removed test token for user: {colored(cls.test_username, 'cyan')}")
+        
+        test_stats.end_time = time.time()
+        test_stats.print_summary()
+    
+    def setUp(self):
+        """Setup before each test"""
+        self.test_name = self.id().split('.')[-1]
+        self.start_time = time.time()
+        print(f"\n{EMOJI_TEST} Running: {colored(self.test_name, 'cyan')}")
+    
+    def tearDown(self):
+        """Cleanup after each test"""
+        duration = time.time() - self.start_time
+        result = getattr(self, '_outcome').result
+        
+        # Check if test passed
+        if len(result.failures) == 0 and len(result.errors) == 0:
+            for failure in result.failures:
+                if self == failure[0]:
+                    status = "FAIL"
+                    break
+            else:
+                for error in result.errors:
+                    if self == error[0]:
+                        status = "ERROR"
+                        break
+                else:
+                    status = "PASS"
+        else:
+            # Check if this specific test has failed or errored
+            for failure in result.failures:
+                if self == failure[0]:
+                    status = "FAIL"
+                    break
+            else:
+                for error in result.errors:
+                    if self == error[0]:
+                        status = "ERROR"
+                        break
+                else:
+                    status = "PASS"
+        
+        # Simplified approach to check if the test passed
+        if status == "PASS":
+            print(f"{EMOJI_SUCCESS} {colored('PASSED', 'green')} {self.test_name} in {duration:.3f}s")
+        else:
+            print(f"{EMOJI_FAILURE} {colored('FAILED', 'red')} {self.test_name} in {duration:.3f}s")
+        
+        test_stats.add_result(self.test_name, "PASS" if status == "PASS" else "FAIL", duration)
+    
+    def make_request(self, method, endpoint, headers=None, data=None, expected_status=200, description=None):
+        """Make an HTTP request with informative logging"""
+        url = f"{BASE_URL}{endpoint}"
+        
+        if description:
+            print(f"{EMOJI_INFO} {description}")
+        
+        print(f"{EMOJI_API} {method.upper()} {url}")
+        
+        try:
+            start = time.time()
+            if method.lower() == 'get':
+                response = requests.get(url, headers=headers, timeout=5)
+            elif method.lower() == 'post':
+                response = requests.post(url, headers=headers, data=json.dumps(data) if data else None, timeout=5)
+            else:
+                raise ValueError(f"Unsupported HTTP method: {method}")
+            
+            duration = time.time() - start
+            
+            status_color = 'green' if response.status_code == expected_status else 'red'
+            print(f"{EMOJI_INFO} Response: HTTP {colored(response.status_code, status_color)} in {duration:.3f}s")
+            
+            return response
+        except requests.RequestException as e:
+            print(f"{EMOJI_FAILURE} Request error: {str(e)}")
+            self.fail(f"Request error: {str(e)}")
+    
+    def test_ping(self):
+        """Test the ping endpoint"""
+        print(f"{EMOJI_SERVER} Testing server heartbeat...")
+        response = requests.get(f"{BASE_URL}/ping")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["message"], "ok")
+    
+    def test_health(self):
+        """Test the health endpoint"""
+        response = self.make_request('GET', '/health', description="Checking API health status")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("status", data)
+        print(f"{EMOJI_INFO} Health status: {colored(data['status'], 'green')}")
+    
+    def test_login_endpoint(self):
+        """Test the login endpoint"""
+        payload = {
+            "username": "testuser",
+            "password": "password123"
+        }
+        response = self.make_request(
+            'POST', 
+            '/auth/login', 
+            headers=self.headers, 
+            data=payload,
+            description="Testing user authentication flow"
         )
-        assert_equals(response.status_code, 201, "Contact creation should return 201")
-        created_contact = response.json()
-        created_ids.append(created_contact['id'])
-        add_resource_for_cleanup('contacts', created_contact['id'])
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("token", data)
+        print(f"{EMOJI_AUTH} Successfully obtained authentication token")
     
-    # Search by name
-    search_response = requests.get(
-        f"{BASE_URL}/contacts/search?query={unique_name}",
-        headers=headers
-    )
-    assert_equals(search_response.status_code, 200, "Contact search should return 200")
-    search_results = search_response.json()
-    assert_is_instance(search_results, list, "Search results should be a list")
-    assert_equals(len(search_results), 2, "Search should find exactly 2 matching contacts")
+    def test_register_endpoint(self):
+        """Test the register endpoint"""
+        unique_timestamp = int(time.time())
+        test_username = f"newuser_{unique_timestamp}"
+        
+        payload = {
+            "username": test_username,
+            "password": "password123",
+            "email": f"test_{unique_timestamp}@example.com"
+        }
+        response = self.make_request(
+            'POST', 
+            '/auth/register', 
+            headers=self.headers, 
+            data=payload,
+            description=f"Testing user registration for '{test_username}'"
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("success", data)
+        print(f"{EMOJI_USER} User '{test_username}' successfully registered")
     
-    # Search by number (using the first contact's number)
-    first_contact_number = contacts_data[0]['number']
-    search_response = requests.get(
-        f"{BASE_URL}/contacts/search?query={first_contact_number}",
-        headers=headers
-    )
-    assert_equals(search_response.status_code, 200, "Contact number search should return 200")
-    search_results = search_response.json()
-    assert_is_instance(search_results, list, "Search results should be a list")
-    assert_equals(len(search_results), 1, "Search by number should find exactly 1 contact")
+    def test_protected_endpoint_with_token(self):
+        """Test accessing a protected endpoint with a valid token"""
+        response = self.make_request(
+            'GET', 
+            '/api/metrics', 
+            headers=self.auth_headers,
+            description="Testing protected endpoint access WITH valid token"
+        )
+        self.assertEqual(response.status_code, 200)
+        print(f"{EMOJI_SECURITY} Protected access successfully granted with valid token")
+    
+    def test_protected_endpoint_without_token(self):
+        """Test accessing a protected endpoint without a token"""
+        response = self.make_request(
+            'GET', 
+            '/api/metrics', 
+            headers=self.headers,
+            expected_status=401,
+            description="Testing protected endpoint access WITHOUT token"
+        )
+        self.assertEqual(response.status_code, 401)
+        print(f"{EMOJI_SECURITY} Protected access correctly denied without token")
+    
+    def test_query_endpoint(self):
+        """Test the query endpoint"""
+        payload = {
+            "query_type": "full",
+            "time_range": {
+                "start": int(time.time()) - 86400,  # 1 day ago
+                "end": int(time.time())
+            },
+            "filters": {},
+            "limit": 10,
+            "offset": 0
+        }
+        response = self.make_request(
+            'POST', 
+            '/api/query', 
+            headers=self.auth_headers, 
+            data=payload,
+            description="Testing standard data query functionality"
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("results", data)
+        print(f"{EMOJI_DB} Query returned {colored(len(data['results']), 'cyan')} results")
+    
+    def test_secure_query_endpoint(self):
+        """Test the secure query endpoint"""
+        payload = {
+            "query_type": "full",
+            "time_range": {
+                "start": int(time.time()) - 86400,
+                "end": int(time.time())
+            },
+            "query_filters": {},
+            "fields_to_redact": getattr(config, "REDACT_FIELDS", ["pii", "sensitive"]),
+            "numeric_fields": ["count", "value"],
+            "epsilon": getattr(config, "DEFAULT_EPSILON", 0.1),
+            "sensitivity": getattr(config, "DEFAULT_SENSITIVITY", 1.0)
+        }
+        response = self.make_request(
+            'POST', 
+            '/api/secure-query', 
+            headers=self.auth_headers, 
+            data=payload,
+            description="Testing privacy-enhanced secure query"
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("results", data)
+        print(f"{EMOJI_PRIVACY} Secure query returned privacy-protected data")
+    
+    def test_privacy_health_endpoint(self):
+        """Test the privacy services health endpoint"""
+        response = self.make_request(
+            'GET', 
+            '/api/privacy-services/health',
+            description="Checking privacy services health"
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["status"], "healthy")
+        print(f"{EMOJI_PRIVACY} Privacy services status: {colored(data['status'], 'green')}")
+    
+    def test_user_info_endpoint(self):
+        """Test getting user info with valid token"""
+        response = self.make_request(
+            'GET', 
+            f'/api/users/{self.test_username}', 
+            headers=self.auth_headers,
+            description=f"Retrieving user profile for '{self.test_username}'"
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["username"], self.test_username)
+        print(f"{EMOJI_USER} Successfully retrieved user profile")
+    
+    def test_metrics_endpoint(self):
+        """Test the metrics endpoint"""
+        response = self.make_request(
+            'GET', 
+            '/api/metrics', 
+            headers=self.auth_headers,
+            description="Retrieving system metrics"
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("metrics", data)
+        print(f"{EMOJI_TIME} Successfully retrieved {colored(len(data['metrics']), 'cyan')} metrics")
 
-def test_send_sms():
-    """Test sending an SMS"""
-    headers = create_auth_headers()
-    
-    sms_data = {
-        'to': TEST_NUMBER,
-        'message': f'Test message {random_string()}',
-        'from': 'TEST'
-    }
-    
-    response = requests.post(
-        f"{BASE_URL}/sms/send",
-        headers=headers,
-        json=sms_data
-    )
-    assert_equals(response.status_code, 200, "SMS send should return 200")
-    result = response.json()
-    assert_in('id', result, "SMS response should contain message ID")
-    assert_in('status', result, "SMS response should contain status")
-    
-    # Store for verification
-    sms_id = result['id']
-    add_resource_for_cleanup('sms', sms_id)
-    
-    # Verify SMS was sent
-    status_response = requests.get(
-        f"{BASE_URL}/sms/{sms_id}",
-        headers=headers
-    )
-    assert_equals(status_response.status_code, 200, "SMS status check should return 200")
-    status_data = status_response.json()
-    assert_equals(status_data['to'], sms_data['to'], "SMS recipient should match")
-    assert_equals(status_data['message'], sms_data['message'], "SMS message should match")
-
-def test_sms_history():
-    """Test retrieving SMS history"""
-    headers = create_auth_headers()
-    
-    # Send a test message first
-    sms_data = {
-        'to': TEST_NUMBER,
-        'message': f'History test {random_string()}',
-        'from': 'TEST'
-    }
-    
-    send_response = requests.post(
-        f"{BASE_URL}/sms/send",
-        headers=headers,
-        json=sms_data
-    )
-    assert_equals(send_response.status_code, 200, "SMS send should return 200")
-    sms_id = send_response.json()['id']
-    add_resource_for_cleanup('sms', sms_id)
-    
-    # Get history
-    history_response = requests.get(
-        f"{BASE_URL}/sms/history",
-        headers=headers
-    )
-    assert_equals(history_response.status_code, 200, "SMS history should return 200")
-    history_data = history_response.json()
-    assert_is_instance(history_data, list, "SMS history should be a list")
-    
-    # Check if our test message is in the history
-    found = False
-    for message in history_data:
-        if message.get('id') == sms_id:
-            found = True
-            assert_equals(message['to'], sms_data['to'], "SMS recipient should match")
-            assert_equals(message['message'], sms_data['message'], "SMS message should match")
-            break
-    assert_true(found, "Test message not found in SMS history")
-    
-    # Test filtering by date range
-    yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
-    tomorrow = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')
-    
-    filtered_response = requests.get(
-        f"{BASE_URL}/sms/history?from={yesterday}&to={tomorrow}",
-        headers=headers
-    )
-    assert_equals(filtered_response.status_code, 200, "Filtered SMS history should return 200")
-    filtered_data = filtered_response.json()
-    assert_is_instance(filtered_data, list, "Filtered SMS history should be a list")
-
-def test_make_call():
-    """Test making an outbound call"""
-    headers = create_auth_headers()
-    
-    call_data = {
-        'to': TEST_NUMBER,
-        'from': 'TEST',
-        'callback_url': 'https://example.com/callback'
-    }
-    
-    response = requests.post(
-        f"{BASE_URL}/calls/make",
-        headers=headers,
-        json=call_data
-    )
-    assert_equals(response.status_code, 200, "Call initiation should return 200")
-    result = response.json()
-    assert_in('id', result, "Call response should contain ID")
-    assert_in('status', result, "Call response should contain status")
-    
-    # Store for verification
-    call_id = result['id']
-    add_resource_for_cleanup('calls', call_id)
-    
-    # Verify call was initiated
-    status_response = requests.get(
-        f"{BASE_URL}/calls/{call_id}",
-        headers=headers
-    )
-    assert_equals(status_response.status_code, 200, "Call status check should return 200")
-    status_data = status_response.json()
-    assert_equals(status_data['to'], call_data['to'], "Call recipient should match")
-
-def test_carrier_lookup():
-    """Test carrier lookup for a phone number"""
-    headers = create_auth_headers()
-    test_number = TEST_NUMBER
-    
-    response = requests.get(
-        f"{BASE_URL}/carrier/lookup?number={test_number}",
-        headers=headers
-    )
-    assert_equals(response.status_code, 200, "Carrier lookup should return 200")
-    lookup_data = response.json()
-    assert_in('carrier', lookup_data, "Lookup should contain carrier info")
-    assert_in('carrier_type', lookup_data, "Lookup should contain carrier type")
-    assert_in('number', lookup_data, "Lookup should contain number")
-    assert_equals(lookup_data['number'], test_number, "Lookup number should match request")
-
-def test_carrier_bulk_lookup():
-    """Test bulk carrier lookup for multiple numbers"""
-    headers = create_auth_headers()
-    
-    test_numbers = [
-        f'555{random.randint(1000000, 9999999)}',
-        f'555{random.randint(1000000, 9999999)}',
-        f'555{random.randint(1000000, 9999999)}'
-    ]
-    
-    bulk_data = {
-        'numbers': test_numbers
-    }
-    
-    response = requests.post(
-        f"{BASE_URL}/carrier/bulk-lookup",
-        headers=headers,
-        json=bulk_data
-    )
-    assert_equals(response.status_code, 200, "Bulk carrier lookup should return 200")
-    results = response.json()
-    assert_in('results', results, "Bulk lookup should contain results")
-    assert_equals(len(results['results']), len(test_numbers), "Should have results for all numbers")
-    
-    for number_data in results['results']:
-        assert_in('number', number_data, "Each result should contain the number")
-        assert_in('carrier', number_data, "Each result should contain carrier info")
-        assert_in('carrier_type', number_data, "Each result should contain carrier type")
-        assert_in(number_data['number'], test_numbers, "Result number should be in request")
-
-def test_spam_check():
-    """Test checking if a number is spam"""
-    headers = create_auth_headers()
-    
-    # Test known spam number
-    spam_number = '9009001234'  # Example known spam number
-    
-    response = requests.get(
-        f"{BASE_URL}/spam-filter/check?number={spam_number}",
-        headers=headers
-    )
-    assert_equals(response.status_code, 200, "Spam check should return 200")
-    result = response.json()
-    assert_in('is_spam', result, "Response should indicate if number is spam")
-    assert_in('confidence', result, "Response should include confidence level")
-    assert_in('details', result, "Response should include details")
-    
-    # Test non-spam number
-    non_spam_number = TEST_NUMBER
-    
-    response = requests.get(
-        f"{BASE_URL}/spam-filter/check?number={non_spam_number}",
-        headers=headers
-    )
-    assert_equals(response.status_code, 200, "Spam check should return 200")
-    result = response.json()
-    assert_in('is_spam', result, "Response should indicate if number is spam")
-
-def test_report_spam():
-    """Test reporting a number as spam"""
-    headers = create_auth_headers()
-    
-    report_data = {
-        'number': f'555{random.randint(1000000, 9999999)}',
-        'reason': 'Test spam report',
-        'evidence': 'Message content was unsolicited advertising'
-    }
-    
-    response = requests.post(
-        f"{BASE_URL}/spam-filter/report",
-        headers=headers,
-        json=report_data
-    )
-    assert_equals(response.status_code, 200, "Spam report should return 200")
-    result = response.json()
-    assert_in('success', result, "Response should indicate success")
-    assert_true(result['success'], "Report should be successful")
-    assert_in('report_id', result, "Response should include report ID")
-    
-    # Verify the report was recorded
-    report_id = result['report_id']
-    verification_response = requests.get(
-        f"{BASE_URL}/spam-filter/reports",
-        headers=headers
-    )
-    assert_equals(verification_response.status_code, 200, "Reports list should return 200")
-    reports = verification_response.json()
-    
-    found = False
-    for report in reports:
-        if report.get('id') == report_id:
-            found = True
-            assert_equals(report['number'], report_data['number'], "Report number should match")
-            assert_equals(report['reason'], report_data['reason'], "Report reason should match")
-            break
-    assert_true(found, "Spam report not found in reports list")
-
-def test_spam_rules_management():
-    """Test managing custom spam filtering rules"""
-    headers = create_auth_headers()
-    
-    # Create a custom rule
-    rule_data = {
-        'name': f'Test Rule {random_string()}',
-        'pattern': f'pattern_{random_string()}',
-        'action': 'block',
-        'priority': random.randint(1, 10)
-    }
-    
-    create_response = requests.post(
-        f"{BASE_URL}/spam-filter/rules",
-        headers=headers,
-        json=rule_data
-    )
-    assert_equals(create_response.status_code, 201, "Rule creation should return 201")
-    created_rule = create_response.json()
-    assert_in('id', created_rule, "Created rule should have an ID")
-    rule_id = created_rule['id']
-    add_resource_for_cleanup('spam-filter/rules', rule_id)
-    
-    # Get the rule
-    get_response = requests.get(
-        f"{BASE_URL}/spam-filter/rules/{rule_id}",
-        headers=headers
-    )
-    assert_equals(get_response.status_code, 200, "Rule retrieval should return 200")
-    rule = get_response.json()
-    assert_equals(rule['name'], rule_data['name'], "Rule name should match")
-    assert_equals(rule['pattern'], rule_data['pattern'], "Rule pattern should match")
-    
-    # Update the rule
-    update_data = {
-        'name': f'Updated {rule_data["name"]}',
-        'action': 'flag'
-    }
-    update_response = requests.put(
-        f"{BASE_URL}/spam-filter/rules/{rule_id}",
-        headers=headers,
-        json=update_data
-    )
-    assert_equals(update_response.status_code, 200, "Rule update should return 200")
-    updated_rule = update_response.json()
-    assert_equals(updated_rule['name'], update_data['name'], "Updated rule name should match")
-    assert_equals(updated_rule['action'], update_data['action'], "Updated rule action should match")
-    
-    # List all rules
-    list_response = requests.get(
-        f"{BASE_URL}/spam-filter/rules",
-        headers=headers
-    )
-    assert_equals(list_response.status_code, 200, "Rules list should return 200")
-    rules = list_response.json()
-    assert_is_instance(rules, list, "Rules should be returned as a list")
-    rule_ids = [r['id'] for r in rules]
-    assert_in(rule_id, rule_ids, "Created rule should be in the list")
-    
-    # Delete the rule
-    delete_response = requests.delete(
-        f"{BASE_URL}/spam-filter/rules/{rule_id}",
-        headers=headers
-    )
-    assert_equals(delete_response.status_code, 204, "Rule deletion should return 204")
-    
-    # Check it's deleted
-    get_deleted_response = requests.get(
-        f"{BASE_URL}/spam-filter/rules/{rule_id}",
-        headers=headers
-    )
-    assert_equals(get_deleted_response.status_code, 404, "Deleted rule should return 404")
-    
-    # Remove from cleanup list since we already deleted it
-    if 'spam-filter/rules' in created_resources and rule_id in created_resources['spam-filter/rules']:
-        created_resources['spam-filter/rules'].remove(rule_id)
-
-def run_all_tests():
-    """Run all integration tests"""
-    print(f"{BOLD}Starting API Integration Tests{RESET}")
-    print(f"API Base URL: {BASE_URL}")
-    
-    start_time = time.time()
-    
-    # Generic API Tests
-    run_test(test_health_check)
-    run_test(test_unauthorized_access)
-    run_test(test_crud_operations)
-    run_test(test_not_found)
-    run_test(test_validation_errors)
-    
-    # Contacts API Tests
-    run_test(test_contact_search)
-    
-    # SMS API Tests
-    run_test(test_send_sms)
-    run_test(test_sms_history)
-    
-    # Call API Tests
-    run_test(test_make_call)
-    
-    # Carrier API Tests
-    run_test(test_carrier_lookup)
-    run_test(test_carrier_bulk_lookup)
-    
-    # Spam Filter API Tests
-    run_test(test_spam_check)
-    run_test(test_report_spam)
-    run_test(test_spam_rules_management)
-    
-    # Clean up
-    cleanup_resources()
-    
-    # Print summary
-    elapsed = time.time() - start_time
-    print(f"\n{BOLD}Test Summary:{RESET}")
-    print(f"Ran {tests_run} tests in {elapsed:.2f} seconds")
-    print(f"{GREEN}Passed: {tests_passed}{RESET}")
-    if tests_failed > 0:
-        print(f"{RED}Failed: {tests_failed}{RESET}")
-        return False
-    else:
-        print(f"{GREEN}All tests passed!{RESET}")
-        return True
-
-if __name__ == '__main__':
-    success = run_all_tests()
-    sys.exit(0 if success else 1)
+if __name__ == "__main__":
+    print(f"\n{EMOJI_ROCKET} {colored('Launching API Integration Tests', 'magenta', attrs=['bold'])}")
+    unittest.main(verbosity=0)
