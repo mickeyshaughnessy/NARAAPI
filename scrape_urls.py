@@ -1,48 +1,40 @@
 from agency_config import api_urls
 import requests
-from bs4 import BeautifulSoup
-from urllib.parse import urlparse
 import string
+import time
+import re
 
-# Function to scrape agency URLs from USA.gov A-Z index
+# Function to scrape raw HTML and print URLs from lines with field--name-field-website
 def scrape_agency_urls():
-    base_url = "https://www.usa.gov/agency-index/"
-    urls = []
+    base_url = "https://www.usa.gov/agency-index"
     
     # Iterate through A-Z
-    for letter in string.ascii_uppercase:
+    for letter in string.ascii_lowercase:
         try:
             # Fetch page for each letter (e.g., /agency-index/a)
-            response = requests.get(f"{base_url}{letter}", timeout=10)
+            if letter == "a":
+                response = requests.get(f"{base_url}{letter}", timeout=10)
+            else:
+                response = requests.get(f"{base_url}/{letter}", timeout=10)
             response.raise_for_status()  # Raise exception for bad status codes
-            soup = BeautifulSoup(response.text, "html.parser")
             
-            # Find all agency links (based on page structure)
-            # Links are typically in <a> tags within <li> under <ul class="agency-list">
-            agency_links = soup.select("ul.agency-list li a[href]")
+            # Split the raw HTML into lines
+            html_lines = response.text.splitlines()
             
-            for link in agency_links:
-                href = link["href"]
-                # Ensure the link is an external .gov URL
-                if href.startswith("http") and ".gov" in href:
-                    # Extract root domain
-                    domain = urlparse(href).netloc
-                    if domain and domain not in urls:
-                        urls.append(domain)
-                        
+            # Process lines containing field--name-field-website
+            for line in html_lines:
+                if "field--name-field-website" in line:
+                    # Extract URL using regex
+                    match = re.search(r'href=["\'](.*?)["\']', line)
+                    if match:
+                        url = match.group(1)
+                        print(url.strip())
+                            
         except requests.RequestException as e:
-            print(f"Error scraping URLs for letter {letter}: {e}")
             continue
-    
-    return sorted(urls)  # Sort alphabetically
+        
+        # Add a small delay to avoid overwhelming the server
+        time.sleep(0.5)
 
-# Add scraped URLs to existing api_urls list
-new_urls = scrape_agency_urls()
-api_urls.extend(new_urls)
-
-# Remove duplicates while preserving order
-api_urls = list(dict.fromkeys(api_urls))
-
-# Print the expanded list
-for url in api_urls:
-    print(url)
+# Run the scraper
+scrape_agency_urls()
