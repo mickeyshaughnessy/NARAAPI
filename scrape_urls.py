@@ -13,7 +13,7 @@ def scrape_agency_urls():
         try:
             # Fetch page for each letter (e.g., /agency-index/a)
             if letter == "a":
-                response = requests.get(f"{base_url}{letter}", timeout=10)
+                response = requests.get(f"{base_url}#A", timeout=10)
             else:
                 response = requests.get(f"{base_url}/{letter}", timeout=10)
             response.raise_for_status()  # Raise exception for bad status codes
