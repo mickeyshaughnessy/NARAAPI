@@ -4,6 +4,10 @@ NARA API
 This is a simple records-mirroring interface for governments.
 
 It allows users easy, safe and inexpensive access to goverment archive services & raw records, ensuring redactions and differential privacy injection are carried out faithfully.
+
+It also contains a crawler (crawler.py) for making authenticated requests to agency APIs.
+
+It also contains placeholders for nonpublic countermeasures and countercountermeasures devices.
 # NARA API Server
 
 A generic API server with data privacy features for querying archives, filtering, redacting names, and applying differential privacy.
@@ -25,6 +29,7 @@ A generic API server with data privacy features for querying archives, filtering
 - `utils.py` - Utility functions and Redis client
 - `config.py` - Server configuration
 - `int_tests.py` - Integration tests
+  `crawler.py` - Backend crawler, asshole
 
 ## Setup
 
